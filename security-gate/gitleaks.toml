@@ -1,0 +1,72 @@
+title = "kynesyslabs security gate"
+
+# Everything gitleaks ships (cloud keys, tokens, private-key blocks, Telegram
+# bot tokens, ...) plus the shapes wallet and node code leaks in.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "hex-private-key"
+description = "Raw hex private key or seed assigned to a key-like name (ed25519 / secp256k1)"
+regex = '''(?i)(?:private[_-]?key|priv[_-]?key|secret[_-]?key|signing[_-]?key|master[_-]?seed|seed)["']?\s*[:=]\s*["'`]?(?:0x)?([0-9a-f]{128}|[0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["private", "priv", "secret", "signing", "seed"]
+
+[[rules]]
+id = "bip39-mnemonic"
+description = "BIP-39 style mnemonic (12-24 words) assigned to a mnemonic/seed/phrase name"
+regex = '''(?i)(?:mnemonic|seed[_-]?phrase|seed|phrase|recovery)["']?\s*[:=]\s*["'`]((?:[a-z]{3,8}[ ]){11,23}[a-z]{3,8})["'`]'''
+secretGroup = 1
+keywords = ["mnemonic", "seed", "phrase", "recovery"]
+
+[[rules]]
+id = "env-mnemonic"
+description = "Mnemonic in an env-style assignment"
+regex = '''(?im)^\s*(?:export\s+)?[A-Z0-9_]*(?:MNEMONIC|SEED_PHRASE|SEED)[A-Z0-9_]*\s*=\s*["']?((?:[a-z]{3,8}[ ]){11,23}[a-z]{3,8})["']?\s*$'''
+secretGroup = 1
+keywords = ["mnemonic", "seed"]
+
+[[rules]]
+id = "telegram-bot-token-bare"
+description = "Telegram bot token, with or without the word telegram nearby"
+regex = '''(?:^|[^0-9])(\d{8,10}:AA[A-Za-z0-9_-]{33})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+keywords = [":aa"]
+
+# Throwaway mnemonics and key vectors are normal in tests; the default rules
+# (cloud keys, tokens, PEM blocks) still apply there.
+[[allowlists]]
+description = "test fixtures for the wallet-key rules"
+targetRules = ["hex-private-key", "bip39-mnemonic", "env-mnemonic"]
+paths = [
+    '''(^|/)(tests?|__tests__|__fixtures__|fixtures|e2e|spec|mocks?)/''',
+    '''\.(test|spec)\.[cm]?[jt]sx?$''',
+]
+
+[[allowlists]]
+description = "public chain data, generated caches, placeholders and content hashes"
+paths = [
+    '''(^|/)data/snapshot/''',
+    '''(^|/)graphify-out/''',
+]
+regexTarget = "secret"
+regexes = [
+    '''\$\{?[A-Za-z_][A-Za-z0-9_]*\}?''',
+    '''^<[^>]+>$''',
+    # KERI / ACDC self-addressing identifiers (public schema and credential SAIDs)
+    '''^E[A-Za-z0-9_-]{43}$''',
+]
+
+[[allowlists]]
+description = "documentation placeholders"
+regexTarget = "secret"
+regexes = [
+    '''(?i)your[-_]|[-_]here$|changeme|placeholder|redacted''',
+    # user:ENV_VAR_NAME, a credential named rather than given
+    '''(?-i)^[^:\s]+:[A-Z][A-Z0-9_]+$''',
+]
+
+[[allowlists]]
+description = "WebSocket handshake nonce (not a credential)"
+regexTarget = "match"
+regexes = ['''(?i)Sec-WebSocket-(Key|Accept)''']
