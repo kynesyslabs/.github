@@ -19,8 +19,10 @@ git config user.name test
 git commit -q --allow-empty -m base
 BASE="$(git rev-parse HEAD)"
 
-words() { tr -dc 'a-z' </dev/urandom | fold -w 5 | head -n "$1" | paste -sd' '; }
-alnum() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
+# Finite generators only: an endless producer cut off by head hangs on GitHub
+# runners, where SIGPIPE is ignored.
+words() { printf '%s\n' abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual | head -n "$1" | paste -sd' '; }
+alnum() { openssl rand -base64 $((2 * $1)) | tr -dc 'A-Za-z0-9' | head -c "$1"; }
 
 fail=0
 expect() { # expect <caught|clean> <name> <file> <content>
