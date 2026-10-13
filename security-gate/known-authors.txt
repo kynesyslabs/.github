@@ -1,0 +1,3 @@
+# Commit author emails allowed without a linked GitHub account, for every
+# repository using the security gate. One per line. The usual fix is for the
+# person to add the email to their GitHub account instead.

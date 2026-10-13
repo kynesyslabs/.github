@@ -1,0 +1,6 @@
+{
+    "name": "Security gate",
+    "description": "Blocks pull requests that add secrets, key stealers or other malicious changes, or commits by unknown authors.",
+    "iconName": "security-gate",
+    "categories": ["Security"]
+}

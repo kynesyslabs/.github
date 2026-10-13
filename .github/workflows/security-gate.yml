@@ -1,0 +1,220 @@
+# Reusable security gate: secrets, malicious changes, vulnerabilities and commit authors.
+#
+# Called from each repository (see workflow-templates/security-gate.yml).
+# It never runs code from the pull request: it checks the PR out as data and
+# runs only git, gitleaks, trivy and the scripts in this repository. No secrets are
+# used; the token is read-only.
+name: security-gate
+
+on:
+  workflow_call:
+    inputs:
+      gate-ref:
+        description: Ref of kynesyslabs/.github to take the rules from
+        type: string
+        default: main
+      authors:
+        description: "Unknown commit authors: block or warn"
+        type: string
+        default: block
+      vulnerabilities:
+        description: "Vulnerabilities the change adds: block or warn"
+        type: string
+        default: block
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  TRIVY_VERSION: 0.75.0
+  TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+
+jobs:
+  range:
+    name: range
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      base: ${{ steps.range.outputs.base }}
+      head: ${{ steps.range.outputs.head }}
+    steps:
+      - id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "base=$PR_BASE" >>"$GITHUB_OUTPUT"
+            echo "head=$PR_HEAD" >>"$GITHUB_OUTPUT"
+          else
+            # A new branch has no "before"; the scan jobs then fall back to
+            # the commits not on the default branch.
+            echo "base=${PUSH_BEFORE}" >>"$GITHUB_OUTPUT"
+            echo "head=$PUSH_AFTER" >>"$GITHUB_OUTPUT"
+          fi
+
+  malicious-changes:
+    name: malicious changes
+    needs: range
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.range.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: kynesyslabs/.github
+          ref: ${{ inputs.gate-ref }}
+          path: .security-gate-src
+          persist-credentials: false
+      - name: Scan added lines
+        env:
+          BASE: ${{ needs.range.outputs.base }}
+          HEAD: ${{ needs.range.outputs.head }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          base="$BASE"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD")"
+          fi
+          node .security-gate-src/security-gate/scan-diff.mjs --base "$base" --head "$HEAD"
+
+  secrets:
+    name: secrets
+    needs: range
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.range.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: kynesyslabs/.github
+          ref: ${{ inputs.gate-ref }}
+          path: .security-gate-src
+          persist-credentials: false
+      - name: Install gitleaks ${{ env.GITLEAKS_VERSION }}
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan new commits
+        env:
+          BASE: ${{ needs.range.outputs.base }}
+          HEAD: ${{ needs.range.outputs.head }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          base="$BASE"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD")"
+          fi
+          # Exemptions come from the base commit only, so a PR cannot add its own.
+          rm -f .gitleaksignore .gitleaks.toml
+          git show "$base:.gitleaksignore" >.gitleaksignore 2>/dev/null || rm -f .gitleaksignore
+          "$RUNNER_TEMP/gitleaks" git --no-banner \
+            --config .security-gate-src/security-gate/gitleaks.toml \
+            --log-opts "$base..$HEAD" --redact --exit-code 1 --verbose
+
+  vulnerabilities:
+    name: vulnerabilities
+    needs: range
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.range.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: kynesyslabs/.github
+          ref: ${{ inputs.gate-ref }}
+          path: .security-gate-src
+          persist-credentials: false
+      - name: Install trivy ${{ env.TRIVY_VERSION }}
+        run: |
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/$tarball"
+          echo "$TRIVY_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" trivy
+      - name: Scan the dependencies before and after the change
+        env:
+          BASE: ${{ needs.range.outputs.base }}
+          HEAD: ${{ needs.range.outputs.head }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ inputs.vulnerabilities }}
+        run: |
+          base="$BASE"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD")"
+          fi
+          # The change answers for its own commits only: compare with the merge base.
+          if mb="$(git merge-base "$base" "$HEAD" 2>/dev/null)"; then base="$mb"; fi
+          trivy="$RUNNER_TEMP/trivy"
+          cache="$RUNNER_TEMP/trivy-cache"
+          mkdir -p "$RUNNER_TEMP/before" "$RUNNER_TEMP/after"
+          git archive "$base" | tar -x -C "$RUNNER_TEMP/before"
+          git archive "$HEAD" | tar -x -C "$RUNNER_TEMP/after"
+          # Exemptions come from the base commit only, so a PR cannot add its own.
+          git show "$base:.trivyignore" >"$RUNNER_TEMP/trivyignore" 2>/dev/null || : >"$RUNNER_TEMP/trivyignore"
+          "$trivy" --cache-dir "$cache" fs --download-db-only --quiet
+          for tree in before after; do
+            "$trivy" --cache-dir "$cache" fs --skip-db-update --scanners vuln,misconfig \
+              --ignorefile "$RUNNER_TEMP/trivyignore" --format json --output "$RUNNER_TEMP/$tree.json" \
+              --quiet "$RUNNER_TEMP/$tree"
+          done
+          node .security-gate-src/security-gate/scan-vulns.mjs \
+            --base "$RUNNER_TEMP/before.json" --head "$RUNNER_TEMP/after.json" --mode "$MODE"
+
+  authors:
+    name: commit authors
+    needs: range
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.range.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: kynesyslabs/.github
+          ref: ${{ inputs.gate-ref }}
+          path: .security-gate-src
+          persist-credentials: false
+      - name: Check who wrote the commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE: ${{ needs.range.outputs.base }}
+          MODE: ${{ inputs.authors }}
+        run: |
+          known="$RUNNER_TEMP/known-authors.txt"
+          { git log --format=%ae "$BASE"; grep -v '^#' .security-gate-src/security-gate/known-authors.txt || true; } \
+            | tr '[:upper:]' '[:lower:]' | sort -u >"$known"
+          if KNOWN_AUTHORS_FILE="$known" node .security-gate-src/security-gate/check-authors.mjs; then
+            exit 0
+          elif [ "$MODE" = "warn" ]; then
+            echo "::warning::unknown commit authors reported above (authors: warn)"
+          else
+            exit 1
+          fi

@@ -1,0 +1,3 @@
+# The gate's own rules and tests contain the patterns they detect.
+*:security-gate/rules.mjs
+*:security-gate/test/**
